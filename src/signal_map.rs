@@ -136,7 +136,7 @@ pub trait SignalMapExt: SignalMap {
 
     #[inline]
     fn for_each<U, F>(self, callback: F) -> ForEach<Self, U, F>
-        where U: Future<Output = ()>,
+        where U: Future<Output=()>,
               F: FnMut(MapDiff<Self::Key, Self::Value>) -> U,
               Self: Sized {
         // TODO a little hacky
@@ -154,13 +154,13 @@ pub trait SignalMapExt: SignalMap {
     }
 
     #[inline]
-    fn boxed<'a>(self) -> Pin<Box<dyn SignalMap<Key = Self::Key, Value = Self::Value> + Send + 'a>>
+    fn boxed<'a>(self) -> Pin<Box<dyn SignalMap<Key=Self::Key, Value=Self::Value> + Send + 'a>>
         where Self: Sized + Send + 'a {
         Box::pin(self)
     }
 
     #[inline]
-    fn boxed_local<'a>(self) -> Pin<Box<dyn SignalMap<Key = Self::Key, Value = Self::Value> + 'a>>
+    fn boxed_local<'a>(self) -> Pin<Box<dyn SignalMap<Key=Self::Key, Value=Self::Value> + 'a>>
         where Self: Sized + 'a {
         Box::pin(self)
     }
@@ -174,10 +174,10 @@ impl<T: ?Sized> SignalMapExt for T where T: SignalMap {}
 ///
 /// This is useful if you don't know the static type, or if you need
 /// indirection.
-pub type BoxSignalMap<'a, Key, Value> = Pin<Box<dyn SignalMap<Key = Key, Value = Value> + Send + 'a>>;
+pub type BoxSignalMap<'a, Key, Value> = Pin<Box<dyn SignalMap<Key=Key, Value=Value> + Send + 'a>>;
 
 /// Same as [`BoxSignalMap`], but without the `Send` requirement.
-pub type LocalBoxSignalMap<'a, Key, Value> = Pin<Box<dyn SignalMap<Key = Key, Value = Value> + 'a>>;
+pub type LocalBoxSignalMap<'a, Key, Value> = Pin<Box<dyn SignalMap<Key=Key, Value=Value> + 'a>>;
 
 
 #[derive(Debug)]
@@ -188,7 +188,7 @@ pub struct Always<A> {
 
 impl<A> Unpin for Always<A> {}
 
-impl<A, K, V> SignalMap for Always<A> where A: IntoIterator<Item = (K, V)> {
+impl<A, K, V> SignalMap for Always<A> where A: IntoIterator<Item=(K, V)> {
     type Key = K;
     type Value = V;
 
@@ -198,10 +198,10 @@ impl<A, K, V> SignalMap for Always<A> where A: IntoIterator<Item = (K, V)> {
             Some(map) => {
                 let entries: Vec<(K, V)> = map.into_iter().collect();
                 Poll::Ready(Some(MapDiff::Replace { entries }))
-            },
+            }
             None => {
                 Poll::Ready(None)
-            },
+            }
         }
     }
 }
@@ -210,7 +210,7 @@ impl<A, K, V> SignalMap for Always<A> where A: IntoIterator<Item = (K, V)> {
 ///
 /// This will usually be a `BTreeMap<K, V>` or `Vec<(K, V)>`.
 #[inline]
-pub fn always<A, K, V>(map: A) -> Always<A> where A: IntoIterator<Item = (K, V)> {
+pub fn always<A, K, V>(map: A) -> Always<A> where A: IntoIterator<Item=(K, V)> {
     Always {
         map: Some(map),
     }
@@ -260,7 +260,6 @@ impl<A> PendingBuilder<A> {
     fn push(&mut self, value: A) {
         if let None = self.first {
             self.first = Some(value);
-
         } else {
             self.rest.push_back(value);
         }
@@ -307,11 +306,11 @@ impl<A, B, F> SignalMap for MapValueSignal<A, B, F>
             break match signal.as_mut().as_pin_mut().map(|signal| signal.poll_map_change(cx)) {
                 None => {
                     true
-                },
+                }
                 Some(Poll::Ready(None)) => {
                     signal.set(None);
                     true
-                },
+                }
                 Some(Poll::Ready(Some(change))) => {
                     new_pending.push(match change {
                         MapDiff::Replace { entries } => {
@@ -325,35 +324,35 @@ impl<A, B, F> SignalMap for MapValueSignal<A, B, F>
                                     poll
                                 }).collect()
                             }
-                        },
+                        }
 
                         MapDiff::Insert { key, value } => {
                             let mut signal = Box::pin(callback(value));
                             let poll = unwrap(signal.as_mut().poll_change(cx));
                             signals.insert(key.clone(), Some(signal));
                             MapDiff::Insert { key, value: poll }
-                        },
+                        }
 
                         MapDiff::Update { key, value } => {
                             let mut signal = Box::pin(callback(value));
                             let poll = unwrap(signal.as_mut().poll_change(cx));
                             *signals.get_mut(&key).expect("The key is not in the map") = Some(signal);
                             MapDiff::Update { key, value: poll }
-                        },
+                        }
 
                         MapDiff::Remove { key } => {
                             signals.remove(&key);
                             MapDiff::Remove { key }
-                        },
+                        }
 
                         MapDiff::Clear {} => {
                             signals.clear();
                             MapDiff::Clear {}
-                        },
+                        }
                     });
 
                     continue;
-                },
+                }
                 Some(Poll::Pending) => false,
             };
         };
@@ -367,24 +366,176 @@ impl<A, B, F> SignalMap for MapValueSignal<A, B, F>
             match signal.as_mut().map(|s| s.as_mut().poll_change(cx)) {
                 Some(Poll::Ready(Some(value))) => {
                     new_pending.push(MapDiff::Update { key: key.clone(), value });
-                },
+                }
                 Some(Poll::Ready(None)) => {
                     *signal = None;
-                },
+                }
                 Some(Poll::Pending) => {
                     has_pending = true;
-                },
-                None => {},
+                }
+                None => {}
             }
         }
 
         if let Some(first) = new_pending.first {
             *pending = new_pending.rest;
             Poll::Ready(Some(first))
-
         } else if done && !has_pending {
             Poll::Ready(None)
+        } else {
+            Poll::Pending
+        }
+    }
+}
 
+#[pin_project(project = FilterMapValueSignalProj)]
+#[derive(Debug)]
+#[must_use = "SignalMaps do nothing unless polled"]
+pub struct FilterMapValueSignal<A, B, F> where A: SignalMap, B: Signal {
+    #[pin]
+    signal: Option<A>,
+    // TODO is there a more efficient way to implement this ?
+    signals: BTreeMap<A::Key, Option<Pin<Box<B>>>>,
+    pending: VecDeque<MapDiff<A::Key, B::Item>>,
+    callback: F,
+}
+impl<A, B, F> crate::signal_map::FilterMapValueSignal<A, B, F>
+    where A: SignalMap,
+          A::Key: Clone + Ord,
+          B: Signal,
+          F: FnMut(A::Value) -> Option<B> {
+    pub fn new_from_signal_map(signal: A, callback: F) -> Self {
+        Self {
+            signal: Some(signal),
+            signals: BTreeMap::new(),
+            pending: VecDeque::new(),
+            callback,
+        }
+    }
+}
+
+impl<A, B, F> SignalMap for crate::signal_map::FilterMapValueSignal<A, B, F>
+    where A: SignalMap,
+          A::Key: Clone + Ord,
+          B: Signal,
+          F: FnMut(A::Value) -> Option<B> {
+    type Key = A::Key;
+    type Value = B::Item;
+
+    fn poll_map_change(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<MapDiff<Self::Key, Self::Value>>> {
+        let crate::signal_map::FilterMapValueSignalProj { mut signal, signals, pending, callback } = self.project();
+
+        if let Some(diff) = pending.pop_front() {
+            return Poll::Ready(Some(diff));
+        }
+
+        let mut new_pending = PendingBuilder::new();
+
+        let done = loop {
+            break match signal.as_mut().as_pin_mut().map(|signal| signal.poll_map_change(cx)) {
+                None => {
+                    true
+                }
+                Some(Poll::Ready(None)) => {
+                    signal.set(None);
+                    true
+                }
+                Some(Poll::Ready(Some(change))) => {
+                    let change = match change {
+                        MapDiff::Replace { entries } => {
+                            *signals = BTreeMap::new();
+
+                            Some(MapDiff::Replace {
+                                entries: entries.into_iter().map(|(key, value)| {
+                                    let signal = callback(value);
+
+                                    if signal.is_some() {
+                                        let mut signal = Box::pin(signal.unwrap());
+                                        let poll = (key.clone(), unwrap(signal.as_mut().poll_change(cx)));
+                                        signals.insert(key, Some(signal));
+
+                                        Some(poll)
+                                    } else {
+                                        None
+                                    }
+                                }).filter_map(|v| v).collect()
+                            })
+                        }
+
+                        MapDiff::Insert { key, value } => {
+                            let signal = callback(value);
+
+                            if signal.is_some() {
+                                let mut signal = Box::pin(signal.unwrap());
+
+                                let poll = unwrap(signal.as_mut().poll_change(cx));
+                                signals.insert(key.clone(), Some(signal));
+
+                                Some(MapDiff::Insert { key, value: poll })
+                            } else {
+                                None
+                            }
+                        }
+
+                        MapDiff::Update { key, value } => {
+                            let signal = callback(value);
+
+                            if signal.is_some() {
+                                let mut signal = Box::pin(signal.unwrap());
+                                let poll = unwrap(signal.as_mut().poll_change(cx));
+                                *signals.get_mut(&key).expect("The key is not in the map") = Some(signal);
+                                Some(MapDiff::Update { key, value: poll })
+                            } else {
+                                None
+                            }
+                        }
+
+                        MapDiff::Remove { key } => {
+                            signals.remove(&key);
+                            Some(MapDiff::Remove { key })
+                        }
+
+                        MapDiff::Clear {} => {
+                            signals.clear();
+                            Some(MapDiff::Clear {})
+                        }
+                    };
+
+                    if let Some(change) = change {
+                        new_pending.push(change);
+                    }
+
+                    continue;
+                }
+                Some(Poll::Pending) => false,
+            };
+        };
+
+        let mut has_pending = false;
+
+        // TODO ensure that this is as efficient as possible
+        // TODO make this more efficient (e.g. using a similar strategy as FuturesUnordered)
+        for (key, signal) in signals.into_iter() {
+            // TODO use a loop until the value stops changing ?
+            match signal.as_mut().map(|s| s.as_mut().poll_change(cx)) {
+                Some(Poll::Ready(Some(value))) => {
+                    new_pending.push(MapDiff::Update { key: key.clone(), value });
+                }
+                Some(Poll::Ready(None)) => {
+                    *signal = None;
+                }
+                Some(Poll::Pending) => {
+                    has_pending = true;
+                }
+                None => {}
+            }
+        }
+
+        if let Some(first) = new_pending.first {
+            *pending = new_pending.rest;
+            Poll::Ready(Some(first))
+        } else if done && !has_pending {
+            Poll::Ready(None)
         } else {
             Poll::Pending
         }
@@ -422,44 +573,41 @@ impl<M> Signal for MapWatchKeySignal<M>
                                 .map(|entry| entry.1)
                         );
                         continue;
-                    },
+                    }
                     Some(MapDiff::Insert { key, value }) | Some(MapDiff::Update { key, value }) => {
                         if key == *watch_key {
                             changed = Some(Some(value));
                         }
                         continue;
-                    },
+                    }
                     Some(MapDiff::Remove { key }) => {
                         if key == *watch_key {
                             changed = Some(None);
                         }
                         continue;
-                    },
+                    }
                     Some(MapDiff::Clear {}) => {
                         changed = Some(None);
                         continue;
-                    },
+                    }
                     None => {
                         true
-                    },
+                    }
                 },
                 Poll::Pending => {
                     false
-                },
-            }
+                }
+            };
         };
 
         if let Some(change) = changed {
             *first = false;
             Poll::Ready(Some(change))
-
         } else if *first {
             *first = false;
             Poll::Ready(Some(None))
-
         } else if is_done {
             Poll::Ready(None)
-
         } else {
             Poll::Pending
         }
@@ -495,7 +643,7 @@ pub struct ForEach<A, B, C> {
 
 impl<A, B, C> Future for ForEach<A, B, C>
     where A: SignalMap,
-          B: Future<Output = ()>,
+          B: Future<Output=()>,
           C: FnMut(MapDiff<A::Key, A::Value>) -> B {
     type Output = ();
 
@@ -569,7 +717,6 @@ mod mutable_btree_map {
         fn change<A, F>(&self, f: F) -> Option<A> where F: FnOnce() -> A {
             if self.senders.is_empty() {
                 None
-
             } else {
                 Some(f())
             }
@@ -616,7 +763,6 @@ mod mutable_btree_map {
             if let Some(value) = self.values.insert(key, value) {
                 self.notify_clone(x, |(key, value)| MapDiff::Update { key, value });
                 Some(value)
-
             } else {
                 self.notify_clone(x, |(key, value)| MapDiff::Insert { key, value });
                 None
@@ -659,7 +805,6 @@ mod mutable_btree_map {
             if let Some(old_value) = self.values.insert(key, value) {
                 self.notify(|| MapDiff::Update { key, value });
                 Some(old_value)
-
             } else {
                 self.notify(|| MapDiff::Insert { key, value });
                 None
@@ -968,24 +1113,24 @@ mod mutable_btree_map {
                             // TODO verify that it is in sorted order ?
                             self.keys = entries.into_iter().map(|(k, _)| k).collect();
                             Poll::Ready(Some(VecDiff::Replace { values: self.keys.clone() }))
-                        },
+                        }
                         MapDiff::Insert { key, value: _ } => {
                             let index = self.keys.binary_search(&key).unwrap_err();
                             self.keys.insert(index, key.clone());
                             Poll::Ready(Some(VecDiff::InsertAt { index, value: key }))
-                        },
+                        }
                         MapDiff::Update { .. } => {
                             continue;
-                        },
+                        }
                         MapDiff::Remove { key } => {
                             let index = self.keys.binary_search(&key).unwrap();
                             self.keys.remove(index);
                             Poll::Ready(Some(VecDiff::RemoveAt { index }))
-                        },
+                        }
                         MapDiff::Clear {} => {
                             self.keys.clear();
                             Poll::Ready(Some(VecDiff::Clear {}))
-                        },
+                        }
                     },
                     Poll::Ready(None) => Poll::Ready(None),
                     Poll::Pending => Poll::Pending,
@@ -1015,25 +1160,25 @@ mod mutable_btree_map {
                         // TODO verify that it is in sorted order ?
                         self.keys = entries.iter().map(|(k, _)| k.clone()).collect();
                         VecDiff::Replace { values: entries }
-                    },
+                    }
                     MapDiff::Insert { key, value } => {
                         let index = self.keys.binary_search(&key).unwrap_err();
                         self.keys.insert(index, key.clone());
                         VecDiff::InsertAt { index, value: (key, value) }
-                    },
+                    }
                     MapDiff::Update { key, value } => {
                         let index = self.keys.binary_search(&key).unwrap();
                         VecDiff::UpdateAt { index, value: (key, value) }
-                    },
+                    }
                     MapDiff::Remove { key } => {
                         let index = self.keys.binary_search(&key).unwrap();
                         self.keys.remove(index);
                         VecDiff::RemoveAt { index }
-                    },
+                    }
                     MapDiff::Clear {} => {
                         self.keys.clear();
                         VecDiff::Clear {}
-                    },
+                    }
                 }
             }))
         }
