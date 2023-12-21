@@ -99,6 +99,15 @@ impl<A> SignalMap for Pin<A>
 // TODO Seal this
 pub trait SignalMapExt: SignalMap {
     #[inline]
+    fn filter<F>(self, callback: F) -> FilterKey<Self, F>
+        where F: FnMut(&Self::Key) -> bool, Self: Sized, {
+        FilterKey {
+            signal: self,
+            callback,
+        }
+    }
+
+    #[inline]
     fn map_value<A, F>(self, callback: F) -> MapValue<Self, F>
         where F: FnMut(Self::Value) -> A,
               Self: Sized {
@@ -120,6 +129,7 @@ pub trait SignalMapExt: SignalMap {
             callback,
         }
     }
+
 
     /// Returns a signal that tracks the value of a particular key in the map.
     #[inline]
@@ -241,6 +251,71 @@ impl<A, B, F> SignalMap for MapValue<A, F>
     }
 }
 
+#[pin_project(project = FilterKeyProj)]
+#[derive(Debug)]
+#[must_use = "SignalMaps do nothing unless polled"]
+pub struct FilterKey<A, B> {
+    #[pin]
+    signal: A,
+    callback: B,
+}
+
+impl<A, F> SignalMap for crate::signal_map::FilterKey<A, F>
+    where A: SignalMap,
+          F: FnMut(&A::Key) -> bool {
+    type Key = A::Key;
+    type Value = A::Value;
+
+    // TODO should this inline ?
+    #[inline]
+    fn poll_map_change(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<MapDiff<Self::Key, Self::Value>>> {
+        let crate::signal_map::FilterKeyProj { signal, callback } = self.project();
+
+        let polled = signal.poll_map_change(cx);
+
+        match polled {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(polled_ready) => {
+                if let Some(polled_map_diff) = polled_ready {
+                    let maybe_out_diff = match polled_map_diff {
+                        MapDiff::Replace { entries } => {
+                            let entries = entries.into_iter().filter(|entry| callback(&entry.0)).collect::<Vec<_>>();
+                            Some(MapDiff::Replace { entries })
+                        }
+                        MapDiff::Insert { key, value } => {
+                            if callback(&key) {
+                                Some(MapDiff::Insert { key, value })
+                            } else { None }
+                        }
+                        MapDiff::Update { key, value } => {
+                            if callback(&key) {
+                                Some(MapDiff::Update { key, value })
+                            } else {
+                                None
+                            }
+                        }
+                        MapDiff::Remove { key } => {
+                            Some(MapDiff::Remove { key })
+                        }
+                        MapDiff::Clear {} => {
+                            Some(MapDiff::Clear {})
+                        }
+                    };
+
+                    if maybe_out_diff.is_some() {
+                        Poll::Ready(maybe_out_diff)
+                    } else {
+                        Poll::Pending
+                    }
+                } else {
+                    Poll::Ready(None)
+                }
+            }
+        }
+    }
+}
+
+
 // This is an optimization to allow a SignalMap to efficiently "return" multiple MapDiff
 // TODO can this be made more efficient ?
 // TODO refactor `signal_map`'s and `signal_vec`'s `PendingBuilder` & `unwrap` into common helpers?
@@ -350,160 +425,6 @@ impl<A, B, F> SignalMap for MapValueSignal<A, B, F>
                             MapDiff::Clear {}
                         }
                     });
-
-                    continue;
-                }
-                Some(Poll::Pending) => false,
-            };
-        };
-
-        let mut has_pending = false;
-
-        // TODO ensure that this is as efficient as possible
-        // TODO make this more efficient (e.g. using a similar strategy as FuturesUnordered)
-        for (key, signal) in signals.into_iter() {
-            // TODO use a loop until the value stops changing ?
-            match signal.as_mut().map(|s| s.as_mut().poll_change(cx)) {
-                Some(Poll::Ready(Some(value))) => {
-                    new_pending.push(MapDiff::Update { key: key.clone(), value });
-                }
-                Some(Poll::Ready(None)) => {
-                    *signal = None;
-                }
-                Some(Poll::Pending) => {
-                    has_pending = true;
-                }
-                None => {}
-            }
-        }
-
-        if let Some(first) = new_pending.first {
-            *pending = new_pending.rest;
-            Poll::Ready(Some(first))
-        } else if done && !has_pending {
-            Poll::Ready(None)
-        } else {
-            Poll::Pending
-        }
-    }
-}
-
-#[pin_project(project = FilterMapValueSignalProj)]
-#[derive(Debug)]
-#[must_use = "SignalMaps do nothing unless polled"]
-pub struct FilterMapValueSignal<A, B, F> where A: SignalMap, B: Signal {
-    #[pin]
-    signal: Option<A>,
-    // TODO is there a more efficient way to implement this ?
-    signals: BTreeMap<A::Key, Option<Pin<Box<B>>>>,
-    pending: VecDeque<MapDiff<A::Key, B::Item>>,
-    callback: F,
-}
-impl<A, B, F> crate::signal_map::FilterMapValueSignal<A, B, F>
-    where A: SignalMap,
-          A::Key: Clone + Ord,
-          B: Signal,
-          F: FnMut(A::Value) -> Option<B> {
-    pub fn new_from_signal_map(signal: A, callback: F) -> Self {
-        Self {
-            signal: Some(signal),
-            signals: BTreeMap::new(),
-            pending: VecDeque::new(),
-            callback,
-        }
-    }
-}
-
-impl<A, B, F> SignalMap for crate::signal_map::FilterMapValueSignal<A, B, F>
-    where A: SignalMap,
-          A::Key: Clone + Ord,
-          B: Signal,
-          F: FnMut(A::Value) -> Option<B> {
-    type Key = A::Key;
-    type Value = B::Item;
-
-    fn poll_map_change(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<MapDiff<Self::Key, Self::Value>>> {
-        let crate::signal_map::FilterMapValueSignalProj { mut signal, signals, pending, callback } = self.project();
-
-        if let Some(diff) = pending.pop_front() {
-            return Poll::Ready(Some(diff));
-        }
-
-        let mut new_pending = PendingBuilder::new();
-
-        let done = loop {
-            break match signal.as_mut().as_pin_mut().map(|signal| signal.poll_map_change(cx)) {
-                None => {
-                    true
-                }
-                Some(Poll::Ready(None)) => {
-                    signal.set(None);
-                    true
-                }
-                Some(Poll::Ready(Some(change))) => {
-                    let change = match change {
-                        MapDiff::Replace { entries } => {
-                            *signals = BTreeMap::new();
-
-                            Some(MapDiff::Replace {
-                                entries: entries.into_iter().map(|(key, value)| {
-                                    let signal = callback(value);
-
-                                    if signal.is_some() {
-                                        let mut signal = Box::pin(signal.unwrap());
-                                        let poll = (key.clone(), unwrap(signal.as_mut().poll_change(cx)));
-                                        signals.insert(key, Some(signal));
-
-                                        Some(poll)
-                                    } else {
-                                        None
-                                    }
-                                }).filter_map(|v| v).collect()
-                            })
-                        }
-
-                        MapDiff::Insert { key, value } => {
-                            let signal = callback(value);
-
-                            if signal.is_some() {
-                                let mut signal = Box::pin(signal.unwrap());
-
-                                let poll = unwrap(signal.as_mut().poll_change(cx));
-                                signals.insert(key.clone(), Some(signal));
-
-                                Some(MapDiff::Insert { key, value: poll })
-                            } else {
-                                None
-                            }
-                        }
-
-                        MapDiff::Update { key, value } => {
-                            let signal = callback(value);
-
-                            if signal.is_some() {
-                                let mut signal = Box::pin(signal.unwrap());
-                                let poll = unwrap(signal.as_mut().poll_change(cx));
-                                *signals.get_mut(&key).expect("The key is not in the map") = Some(signal);
-                                Some(MapDiff::Update { key, value: poll })
-                            } else {
-                                None
-                            }
-                        }
-
-                        MapDiff::Remove { key } => {
-                            signals.remove(&key);
-                            Some(MapDiff::Remove { key })
-                        }
-
-                        MapDiff::Clear {} => {
-                            signals.clear();
-                            Some(MapDiff::Clear {})
-                        }
-                    };
-
-                    if let Some(change) = change {
-                        new_pending.push(change);
-                    }
 
                     continue;
                 }
