@@ -10,4 +10,3 @@ mod sample_stream_cloned;
 mod stop_if;
 mod switch_signal_vec;
 mod throttle;
-mod mutable_btreemap;
