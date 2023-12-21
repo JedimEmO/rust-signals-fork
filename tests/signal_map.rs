@@ -262,7 +262,6 @@ async fn test_filter_map() {
                 MapDiff::Update { key, value } => { locked.insert_cloned(key, value); }
             }
 
-            println!("ijdoiqwjdqwd");
             proceed_tx.try_send(()).unwrap();
 
             async {}
